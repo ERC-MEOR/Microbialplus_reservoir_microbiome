@@ -1,0 +1,893 @@
+# ============================ PART 1: SETUP AND DATA PREPARATION ============================
+
+# Clear environment
+rm(list = ls())
+gc()
+
+# Load required packages
+library(plspm)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(vegan)
+library(ape)
+library(leaps)      # For all-subsets regression
+library(car)        # For VIF calculation
+library(corrplot)   # For correlation visualization
+library(boot)       # For bootstrap methods
+library(tibble)
+
+# Set random seed for reproducibility
+set.seed(123)
+
+# Read data
+data <- read.csv("all_data-std.txt", header = TRUE, row.names = 1, sep = "\t")
+
+mtotu <- read.table("MAG_abundance.txt", header = TRUE, row.names = 1, sep = "\t")
+
+mtgene <- read.table("gene_TPM.txt", header = TRUE, row.names = 1, sep = "\t")
+mtgene <- t(mtgene)
+
+# Standardization function (0-1 normalization)
+standardize_variables <- function(data, vars_to_standardize = NULL, exclude_vars = NULL) {
+  if (is.null(vars_to_standardize)) {
+    vars_to_standardize <- names(data)[sapply(data, is.numeric)]
+  }
+  if (!is.null(exclude_vars)) {
+    vars_to_standardize <- setdiff(vars_to_standardize, exclude_vars)
+  }
+  data[vars_to_standardize] <- lapply(data[vars_to_standardize], function(x) {
+    (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+  })
+  return(data)
+}
+
+# Variables to exclude from standardization
+exclude_vars <- c("oil_well")
+
+# Process functional gene data 1
+fucgene1 <- read.table("gene_act_1.txt", header = TRUE, row.names = 1, sep = "\t")
+fucgene1 <- t(fucgene1)
+fucgene1 <- as.data.frame(fucgene1)
+
+processed_list <- list()
+num_batches <- ceiling(nrow(fucgene1) / 7)
+
+for (i in 1:num_batches) {
+  start_row <- (i - 1) * 7 + 1
+  end_row <- min(i * 7, nrow(fucgene1))
+  batch_data <- fucgene1[start_row:end_row, ]
+  standardized_batch <- standardize_variables(batch_data)
+  processed_list[[i]] <- standardized_batch
+}
+
+fucgene1 <- do.call(rbind, processed_list)
+
+# Process functional gene data 2
+fucgene2 <- read.table("gene_act_2.txt", header = TRUE, row.names = 1, sep = "\t")
+fucgene2 <- t(fucgene2)
+fucgene2 <- as.data.frame(fucgene2)
+
+processed_list <- list()
+num_batches <- ceiling(nrow(fucgene2) / 7)
+
+for (i in 1:num_batches) {
+  start_row <- (i - 1) * 7 + 1
+  end_row <- min(i * 7, nrow(fucgene2))
+  batch_data <- fucgene2[start_row:end_row, ]
+  standardized_batch <- standardize_variables(batch_data)
+  processed_list[[i]] <- standardized_batch
+}
+
+fucgene2 <- do.call(rbind, processed_list)
+
+# Calculate Beta-diversity indices
+dist1 <- vegdist(motu,method = "bray")
+pcoa1 <- pcoa(dist1, correction = "cailliez", rn = NULL)
+PC1_1 = pcoa1$vectors[ ,1]
+PC1_2 = pcoa1$vectors[ ,2]
+
+dist2 <- vegdist(mtotu,method = "bray")
+pcoa2 <- pcoa(dist2, correction = "cailliez", rn = NULL)
+PC2_1 = pcoa2$vectors[ ,1]
+PC2_2 = pcoa2$vectors[ ,2]
+
+cor.test(data$oil_production, PC2_2, alternative = "two.sided", method = "spearman", exact = FALSE)
+
+# Only PC2_2 show significant correlation (p<0.001)
+
+dist3 <- vegdist(gene,method = "bray")
+pcoa3 <- pcoa(dist3, correction = "cailliez", rn = NULL)
+PC3_1 = pcoa3$vectors[ ,1]
+PC3_2 = pcoa3$vectors[ ,2]
+
+dist4 <- vegdist(mtgene,method = "bray")
+pcoa4 <- pcoa(dist4, correction = "cailliez", rn = NULL)
+PC4_1 = pcoa4$vectors[ ,1]
+PC4_2 = pcoa4$vectors[ ,2]
+
+cor.test(data$oil_production, PC4_1, alternative = "two.sided", method = "spearman", exact = FALSE)
+# p-value = 0.009215
+
+# Only PC4_1 show significant correlation (p<0.001)
+
+# Merge all data
+data <- cbind(data, PC2_2, PC4_1, fucgene1, fucgene2)
+
+# ============================ PART 2: INITIAL VARIABLE SET BASED ON DOMAIN KNOWLEDGE ============================
+cat("=== Defining initial variable set based on domain knowledge ===\n")
+comdata_initial <- list(
+  Daily_BcCF = "Surfactin_intes",
+  Peptidase = c("M42", "A39", "A08", "C44", "M24A", "A24X", "I103", "M50B", 
+                "X14", "G05", "S46", "SPE", "S16", "M20C", "M23X", "S14", 
+                "M48B", "M29", "M38", "S33", "M20F", "T01A", "M16B", "T03", 
+                "M13", "S09B", "C01A", "M48A", "M103", "S09X", "U56", "C40", 
+                "M10X", "I39", "M74", "A22B"),
+  fatty = c("fadD", "fadE", "acd", "bcd", "mmgC", "crt", "fadB", "mmgB", "atoB"),
+  HD = c("alkM", "assA", "bamB"),
+  SCFC = c("acs", "acdAB", "pta", "atoD", "ptb", "buk"),
+  gas = c("yiaY", "adh", "adhC", "FeFe_Group_A", "mcrA", "mcrB", "IDH3", 
+          "leuB", "fdhA", "fdhA2", "sucA", "bkdA", "coxS", "porA", "por", 
+          "korA", "korB", "fwdE", "korC", "cdhA", "iorB", "gcvP", "ilvB", 
+          "ilvH", "dxs", "fabF", "fabH", "bioF", "thiDN", "menA", "panD", 
+          "lysA", "dfp", "pckA", "alsD", "psd", "hpaG", "ddc", "gcdA"),
+  Biof = c("algA", "glgP", "wecB", "paaK"),
+  pressure = "flow_pressure",
+  Marker_mOTU = c("Aliarcobacter_ellisii_Bin937", "Selenomonadales_Bin511", 
+                  "Syntrophomonadales_Bin474", "Pseudothermotoga_A_hypogea_Bin1754", 
+                  "Microgenomatia_Bin419", "S7_Methanobacterium_D_Bin30", 
+                  "S7_Microgenomatia_Bin562", "Syntrophomonadales_Bin1583", 
+                  "Bacteria_Bin904", "S7_Thermosynergistes_pyruvativorans_Bin219", 
+                  "Syntrophothermus_Bin818", "S7_Paceibacterales_Bin578", 
+                  "S7_Bacillota_G_Bin226", "Paceibacteria_Bin863", 
+                  "Trichlorobacter_Bin370", "Caldisericum_Bin914", 
+                  "Syntrophorhabdaceae_Bin1814", "S6_Atribacterota_Bin116", 
+                  "Syntrophothermus_Bin1193", "S6_Thermosynergistes_pyruvativorans_Bin214", 
+                  "S7_Pseudothermotoga_A_hypogea_Bin548", "Chitinophaga_Bin1647", 
+                  "Syntrophales_Bin512"),
+  Beta_dive = c("PC2_2", "PC4_1"),
+  Hydrogeochemical = c("CO32", "pH", "HCOOH"),
+  Oil_production = c("oil_production", "water_content")
+)
+
+# ============================ PART 3: EXPLORATORY ANALYSIS ============================
+cat("\n=== Exploratory Analysis ===\n")
+
+# 1. Variable pre-screening and all-subsets regression
+cat("1. Variable pre-screening and all-subsets regression:\n")
+
+# Get all numeric variables (excluding oil_well)
+numeric_vars <- names(data)[sapply(data, is.numeric)]
+candidate_vars <- setdiff(numeric_vars, "oil_well")
+
+# Set oil production as response variable
+response_var <- "oil_production"
+
+if (!response_var %in% names(data)) {
+  stop(sprintf("Response variable '%s' not found in data", response_var))
+}
+
+# Exclude response variable from predictors
+predictor_vars <- setdiff(candidate_vars, response_var)
+
+# Prepare data for regression
+predictor_data <- data[, predictor_vars, drop = FALSE]
+predictor_data <- subset(predictor_data, select = -c(sample, Surfactin_tot))
+
+response_data <- data[[response_var]]
+
+# Remove missing values
+complete_cases <- complete.cases(cbind(response_data, predictor_data))
+response_complete <- response_data[complete_cases]
+predictor_complete <- predictor_data[complete_cases, , drop = FALSE]
+
+if (length(response_complete) < 5) {
+  stop("Insufficient samples for all-subsets regression")
+}
+
+cat(sprintf("Original predictor variables: %d\n", ncol(predictor_complete)))
+
+# Method 1: Remove highly correlated variables (correlation > 0.70)
+cat("\nVariable pre-screening (based on correlations):\n")
+
+cor_matrix <- cor(predictor_complete, use = "complete.obs")
+high_cor_pairs <- which(abs(cor_matrix) > 0.70 & upper.tri(cor_matrix), arr.ind = TRUE)
+
+if (nrow(high_cor_pairs) > 0) {
+  cat(sprintf("Found %d highly correlated variable pairs (|r| > 0.70):\n", nrow(high_cor_pairs)))
+  
+  high_cor_df <- data.frame(
+    Var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+    Var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+    Correlation = cor_matrix[high_cor_pairs]
+  )
+  
+  high_cor_df <- high_cor_df[order(-abs(high_cor_df$Correlation)), ]
+  
+  for (i in 1:min(10, nrow(high_cor_df))) {
+    cat(sprintf("  %s vs %s: r = %.3f\n", 
+                high_cor_df$Var1[i], 
+                high_cor_df$Var2[i], 
+                high_cor_df$Correlation[i]))
+  }
+  
+  # Calculate correlation with response variable
+  var_cor_with_response <- sapply(predictor_vars, function(var) {
+    if (var %in% colnames(predictor_complete)) {
+      cor(predictor_complete[[var]], response_complete, use = "complete.obs")
+    } else {
+      NA
+    }
+  })
+  
+  # Identify which latent variable each predictor belongs to
+  var_to_latent <- list()
+  
+  for (var in predictor_vars) {
+    for (latent_name in names(latent_patterns)) {
+      patterns <- latent_patterns[[latent_name]]
+      matched <- any(sapply(patterns, function(pattern) grepl(pattern, var)))
+      if (matched) {
+        var_to_latent[[var]] <- latent_name
+        break
+      }
+    }
+    if (is.null(var_to_latent[[var]])) {
+      var_to_latent[[var]] <- "Other"
+    }
+  }
+  
+  # Remove lower-correlated variable in highly correlated pairs
+  vars_to_remove <- character(0)
+  
+  for (i in 1:nrow(high_cor_df)) {
+    var1 <- high_cor_df$Var1[i]
+    var2 <- high_cor_df$Var2[i]
+    
+    cor1 <- abs(var_cor_with_response[var1])
+    cor2 <- abs(var_cor_with_response[var2])
+    
+    latent1 <- var_to_latent[[var1]]
+    latent2 <- var_to_latent[[var2]]
+    
+    if (!is.na(cor1) && !is.na(cor2)) {
+      if (latent1 == latent2 && latent1 != "Other") {
+        if (cor1 >= cor2) {
+          vars_to_remove <- c(vars_to_remove, var2)
+        } else {
+          vars_to_remove <- c(vars_to_remove, var1)
+        }
+      } else {
+        if (cor1 >= cor2) {
+          vars_to_remove <- c(vars_to_remove, var2)
+        } else {
+          vars_to_remove <- c(vars_to_remove, var1)
+        }
+      }
+    }
+  }
+  
+  vars_to_remove <- unique(vars_to_remove)
+  
+  if (length(vars_to_remove) > 0) {
+    cat(sprintf("\nRemoving %d highly correlated variables:\n", length(vars_to_remove)))
+    cat(paste(vars_to_remove, collapse = ", "), "\n")
+    
+    predictor_complete <- predictor_complete[, !colnames(predictor_complete) %in% vars_to_remove, drop = FALSE]
+    selected_vars <- colnames(predictor_complete)
+  } else {
+    selected_vars <- predictor_vars
+  }
+} else {
+  selected_vars <- predictor_vars
+  cat("No highly correlated variable pairs found (|r| > 0.70)\n")
+}
+
+cat(sprintf("\nVariables after correlation screening: %d\n", length(selected_vars)))
+
+# Method 2: VIF screening
+cat("\nVIF-based screening (VIF threshold = 5):\n")
+
+if (length(selected_vars) > 1) {
+  lm_full <- lm(response_complete ~ ., data = data.frame(response = response_complete, predictor_complete))
+  
+  vif_values <- tryCatch({
+    vif(lm_full)
+  }, error = function(e) {
+    cat("VIF calculation failed:", e$message, "\n")
+    return(NULL)
+  })
+  
+  if (!is.null(vif_values)) {
+    high_vif_vars <- names(vif_values[vif_values > 5])
+    
+    if (length(high_vif_vars) > 0) {
+      cat(sprintf("Found %d variables with VIF > 5:\n", length(high_vif_vars)))
+      
+      while (length(high_vif_vars) > 0) {
+        max_vif_var <- names(which.max(vif_values[high_vif_vars]))
+        cat(sprintf("Removing variable '%s' (VIF = %.2f)\n", max_vif_var, vif_values[max_vif_var]))
+        
+        predictor_complete <- predictor_complete[, colnames(predictor_complete) != max_vif_var, drop = FALSE]
+        selected_vars <- colnames(predictor_complete)
+        
+        if (length(selected_vars) > 1) {
+          lm_full <- lm(response_complete ~ ., data = data.frame(response = response_complete, predictor_complete))
+          vif_values <- tryCatch({
+            vif(lm_full)
+          }, error = function(e) {
+            return(NULL)
+          })
+          
+          if (!is.null(vif_values)) {
+            high_vif_vars <- names(vif_values[vif_values > 5])
+          } else {
+            break
+          }
+        } else {
+          break
+        }
+      }
+    } else {
+      cat("All variables have VIF ≤ 5\n")
+    }
+  }
+} else {
+  cat("Insufficient variables for VIF analysis\n")
+}
+
+cat(sprintf("\nVariables after VIF screening: %d\n", length(selected_vars)))
+
+# Ensure each latent variable has at least one variable
+cat("\nEnsuring each latent variable has at least one indicator...\n")
+
+required_latents <- c("Daily_BcCF", "Peptidase", "fatty", "HD", "SCFC", "gas", 
+                     "Biof", "pressure", "Marker_mOTU", "Beta_dive", 
+                     "Hydrogeochemical", "Oil_production")
+
+for (latent in required_latents) {
+  patterns <- latent_patterns[[latent]]
+  latent_vars_in_selected <- character(0)
+  
+  for (pattern in patterns) {
+    matches <- grep(pattern, selected_vars, value = TRUE, ignore.case = TRUE)
+    latent_vars_in_selected <- c(latent_vars_in_selected, matches)
+  }
+  
+  latent_vars_in_selected <- unique(latent_vars_in_selected)
+  
+  if (length(latent_vars_in_selected) == 0) {
+    cat(sprintf("No variables selected for latent variable '%s', adding one...\n", latent))
+    
+    domain_vars <- comdata_initial[[latent]]
+    
+    if (!is.null(domain_vars) && length(domain_vars) > 0) {
+      var_to_add <- domain_vars[1]
+      
+      if (var_to_add %in% colnames(data)) {
+        selected_vars <- c(selected_vars, var_to_add)
+        
+        if (!var_to_add %in% colnames(predictor_complete)) {
+          predictor_complete <- cbind(predictor_complete, data[complete_cases, var_to_add, drop = FALSE])
+          colnames(predictor_complete)[ncol(predictor_complete)] <- var_to_add
+        }
+        
+        cat(sprintf("  Added variable '%s' to latent variable '%s'\n", var_to_add, latent))
+      } else {
+        cat(sprintf("  Warning: Variable '%s' not found in data\n", var_to_add))
+      }
+    } else {
+      cat(sprintf("  Warning: No predefined variables for latent variable '%s'\n", latent))
+    }
+  } else {
+    cat(sprintf("Latent variable '%s' has %d variables: %s\n", 
+                latent, length(latent_vars_in_selected), 
+                paste(latent_vars_in_selected, collapse = ", ")))
+  }
+}
+
+selected_vars <- setdiff(selected_vars, "oil_production")
+cat(sprintf("\nFinal variables for all-subsets regression: %d\n", length(selected_vars)))
+
+if (length(selected_vars) < 2) {
+  stop("Insufficient variables after screening for all-subsets regression")
+}
+
+# Use only screened variables
+predictor_subset <- predictor_complete[, selected_vars, drop = FALSE]
+
+# Determine maximum number of variables for regression
+n_samples <- length(response_complete)
+n_vars <- ncol(predictor_subset)
+
+cat(sprintf("Sample size: %d\n", n_samples))
+cat(sprintf("Variable count: %d\n", n_vars))
+
+max_vars <- n_vars
+cat(sprintf("Maximum variables for all-subsets regression: %d\n", max_vars))
+
+# Run all-subsets regression
+cat("\nRunning all-subsets regression...\n")
+cat(sprintf("Considering models with up to %d variables\n", max_vars))
+
+if (max_vars > 30) {
+  nbest_value <- 1
+} else if (max_vars > 20) {
+  nbest_value <- 2
+} else {
+  nbest_value <- 3
+}
+
+cat(sprintf("Keeping %d best models for each variable count\n", nbest_value))
+
+all_subsets <- regsubsets(response_complete ~ ., 
+                          data = predictor_subset, 
+                          nbest = nbest_value,           
+                          nvmax = max_vars,
+                          really.big = TRUE)
+
+subset_summary <- summary(all_subsets)
+
+# Identify best model
+cat("\nBest model (by adjusted R²):\n")
+best_model_idx <- which.max(subset_summary$adjr2)
+best_model_vars <- names(coef(all_subsets, best_model_idx))[-1]  # Exclude intercept
+best_model_size <- length(best_model_vars)
+cat(sprintf("Best model includes %d variables:\n", best_model_size))
+cat("Variables:", paste(best_model_vars, collapse = ", "), "\n")
+cat("Adjusted R²:", round(subset_summary$adjr2[best_model_idx], 3), "\n")
+cat("Cp statistic:", round(subset_summary$cp[best_model_idx], 3), "\n")
+cat("BIC:", round(subset_summary$bic[best_model_idx], 3), "\n")
+
+# Model statistics
+cat("\nModel performance by variable count:\n")
+
+if (length(subset_summary$adjr2) < max_vars) {
+  cat(sprintf("Warning: subset_summary length(%d) < max_vars(%d), adjusting max_vars\n", 
+              length(subset_summary$adjr2), max_vars))
+  max_vars <- min(max_vars, length(subset_summary$adjr2))
+}
+
+model_stats <- data.frame(
+  nvars = 1:max_vars,
+  adjr2 = if (length(subset_summary$adjr2) >= max_vars) {
+    subset_summary$adjr2[1:max_vars]
+  } else {
+    c(subset_summary$adjr2, rep(NA, max_vars - length(subset_summary$adjr2)))
+  },
+  cp = if (length(subset_summary$cp) >= max_vars) {
+    subset_summary$cp[1:max_vars]
+  } else {
+    c(subset_summary$cp, rep(NA, max_vars - length(subset_summary$cp)))
+  },
+  bic = if (length(subset_summary$bic) >= max_vars) {
+    subset_summary$bic[1:max_vars]
+  } else {
+    c(subset_summary$bic, rep(NA, max_vars - length(subset_summary$bic)))
+  }
+)
+
+if (any(is.infinite(model_stats$cp))) {
+  cat("Warning: Cp statistic contains Inf values, replacing with NA\n")
+  model_stats$cp[is.infinite(model_stats$cp)] <- NA
+}
+
+if (any(is.nan(model_stats$cp))) {
+  cat("Warning: Cp statistic contains NaN values, replacing with NA\n")
+  model_stats$cp[is.nan(model_stats$cp)] <- NA
+}
+
+print(model_stats)
+
+# Best models by different criteria
+cat("\nBest models by different criteria:\n")
+
+valid_adjr2 <- which(!is.na(model_stats$adjr2))
+if (length(valid_adjr2) > 0) {
+  best_adjr2_idx <- valid_adjr2[which.max(model_stats$adjr2[valid_adjr2])]
+  cat(sprintf("Best by adjusted R²: %d variables, adjusted R²=%.3f\n", 
+              best_adjr2_idx, model_stats$adjr2[best_adjr2_idx]))
+} else {
+  best_adjr2_idx <- 1
+  cat("Adjusted R²: No valid data\n")
+}
+
+valid_cp <- which(!is.na(model_stats$cp))
+if (length(valid_cp) > 0) {
+  cp_diffs <- abs(model_stats$cp[valid_cp] - model_stats$nvars[valid_cp])
+  best_cp_idx <- valid_cp[which.min(cp_diffs)]
+  cat(sprintf("Best by Cp criterion: %d variables, Cp=%.3f\n", 
+              best_cp_idx, model_stats$cp[best_cp_idx]))
+} else {
+  best_cp_idx <- 1
+  cat("Cp criterion: No valid data\n")
+}
+
+valid_bic <- which(!is.na(model_stats$bic))
+if (length(valid_bic) > 0) {
+  best_bic_idx <- valid_bic[which.min(model_stats$bic[valid_bic])]
+  cat(sprintf("Best by BIC: %d variables, BIC=%.3f\n", 
+              best_bic_idx, model_stats$bic[best_bic_idx]))
+} else {
+  best_bic_idx <- 1
+  cat("BIC: No valid data\n")
+}
+
+# Visualize model selection
+cat("\nModel selection statistics:\n")
+selection_stats <- model_stats
+
+png("model_selection_plot.png", width = 1400, height = 1000, res = 150)
+par(mfrow = c(2, 2))
+
+# Adjusted R² plot
+plot(selection_stats$nvars, selection_stats$adjr2, 
+     type = "b", col = "blue", lwd = 2,
+     xlab = "Number of Variables", ylab = "Adjusted R²",
+     main = "Adjusted R² vs Number of Variables",
+     ylim = c(min(selection_stats$adjr2, na.rm = TRUE) - 0.05, 
+              max(selection_stats$adjr2, na.rm = TRUE) + 0.05))
+points(best_adjr2_idx, selection_stats$adjr2[best_adjr2_idx], 
+       col = "red", pch = 19, cex = 1.5)
+
+# Cp plot
+if (all(is.na(selection_stats$cp)) || all(is.infinite(selection_stats$cp))) {
+  cat("Warning: Cp statistic all NA or Inf, skipping Cp plot\n")
+  plot(1, type = "n", xlab = "Number of Variables", ylab = "Cp Statistic",
+       main = "Cp Statistic vs Number of Variables (Data unavailable)",
+       xlim = c(1, max_vars), ylim = c(0, 1))
+  text(max_vars/2, 0.5, "Cp statistic unavailable", cex = 1.2, col = "red")
+} else {
+  valid_indices <- which(!is.na(selection_stats$cp) & !is.infinite(selection_stats$cp))
+  
+  if (length(valid_indices) > 0) {
+    cp_range <- range(selection_stats$cp[valid_indices], na.rm = TRUE)
+    cp_min <- min(cp_range[1] - 5, 0)
+    cp_max <- max(cp_range[2] + 5, max_vars * 2)
+    
+    plot(selection_stats$nvars, selection_stats$cp, 
+         type = "b", col = "green", lwd = 2,
+         xlab = "Number of Variables", ylab = "Cp Statistic",
+         main = "Cp Statistic vs Number of Variables",
+         ylim = c(cp_min, cp_max))
+    
+    abline(h = selection_stats$nvars, lty = 2, col = "gray")
+    
+    if (best_cp_idx %in% valid_indices) {
+      points(best_cp_idx, selection_stats$cp[best_cp_idx], 
+             col = "red", pch = 19, cex = 1.5)
+    } else {
+      cat("Warning: Best Cp model index not in valid range\n")
+    }
+  } else {
+    cat("Warning: No valid Cp data, skipping Cp plot\n")
+    plot(1, type = "n", xlab = "Number of Variables", ylab = "Cp Statistic",
+         main = "Cp Statistic vs Number of Variables (No valid data)",
+         xlim = c(1, max_vars), ylim = c(0, 1))
+    text(max_vars/2, 0.5, "No valid Cp data", cex = 1.2, col = "red")
+  }
+}
+
+# BIC plot
+plot(selection_stats$nvars, selection_stats$bic, 
+     type = "b", col = "purple", lwd = 2,
+     xlab = "Number of Variables", ylab = "BIC",
+     main = "BIC vs Number of Variables")
+points(best_bic_idx, selection_stats$bic[best_bic_idx], 
+       col = "red", pch = 19, cex = 1.5)
+
+# Variable frequency
+var_freq <- table(unlist(lapply(1:max_vars, function(i) {
+  names(coef(all_subsets, i))[-1]
+})))
+var_freq_df <- data.frame(
+  Variable = names(var_freq),
+  Frequency = as.numeric(var_freq)
+)
+var_freq_df <- var_freq_df[order(-var_freq_df$Frequency), ]
+
+top_n_vars <- min(20, nrow(var_freq_df))
+barplot(var_freq_df$Frequency[1:top_n_vars], 
+        names.arg = var_freq_df$Variable[1:top_n_vars],
+        las = 2, cex.names = 0.7, col = "orange",
+        main = sprintf("Top %d most frequently selected variables", top_n_vars),
+        ylab = "Selection frequency")
+
+dev.off()
+cat("Model selection plot saved to: model_selection_plot.png\n")
+
+# Save best model variables
+best_vars_df <- data.frame(
+  Variable = best_model_vars,
+  Model_Size = best_model_size,
+  Criterion = "Adj_R2"
+)
+write.table(best_vars_df, file = "best_model_variables.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+cat("Best model variables saved to: best_model_variables.txt\n")
+
+# Save model selection statistics
+write.table(selection_stats, file = "model_selection_stats.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+cat("Model selection statistics saved to: model_selection_stats.txt\n")
+
+# Save variable screening info
+var_selection_info <- data.frame(
+  Original_Variables = length(predictor_vars),
+  Selected_Variables = length(selected_vars),
+  Used_in_Regression = ncol(predictor_subset),
+  Best_Model_Variables = length(best_model_vars),
+  Sample_Size = n_samples,
+  Max_Vars_Considered = max_vars,
+  Note = paste("Screening strategy: 1) Correlation threshold 0.70;", 
+               "2) VIF threshold 5;", 
+               "All-subsets regression considered up to", max_vars, "variables")
+)
+write.table(var_selection_info, file = "variable_selection_info.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+cat("\nExploratory analysis complete, proceeding to PLS-PM model building...\n")
+
+# ============================ PART 4: INTEGRATE REGRESSION RESULTS INTO PLS-PM MODEL ============================
+cat("\n=== Integrating regression analysis results into PLS-PM model ===\n")
+
+cat("Using best variables from all-subsets regression...\n")
+cat(sprintf("Regression analysis identified %d important variables:\n", length(best_model_vars)))
+print(best_model_vars)
+
+# Update latent variable sets based on regression results
+cat("\nUpdating latent variable sets based on regression results...\n")
+
+comdata_updated <- list()
+
+for (lv_name in names(comdata_initial)) {
+  domain_vars <- comdata_initial[[lv_name]]
+  selected_vars <- intersect(domain_vars, best_model_vars)
+  
+  if (length(selected_vars) == 0) {
+    cat(sprintf("Latent variable '%s': No variables selected in regression, keeping original\n", lv_name))
+    selected_vars <- domain_vars[1]
+    if (is.na(selected_vars) || length(selected_vars) == 0) {
+      cat(sprintf("  Warning: Latent variable '%s' has no predefined variables, skipping\n", lv_name))
+      next
+    }
+  } else {
+    cat(sprintf("Latent variable '%s': Selected %d variables from %d original\n",
+                lv_name, length(selected_vars), length(domain_vars)))
+  }
+  
+  comdata_updated[[lv_name]] <- selected_vars
+}
+
+# Remove latent variables without indicators
+comdata_updated <- comdata_updated[sapply(comdata_updated, length) > 0]
+
+cat(sprintf("\nUpdated latent variables count: %d\n", length(comdata_updated)))
+for (lv_name in names(comdata_updated)) {
+  cat(sprintf("  %s: %d variables\n", lv_name, length(comdata_updated[[lv_name]])))
+}
+
+# Save updated variable set
+update_info <- data.frame(
+  Latent_Variable = names(comdata_updated),
+  N_Indicators = sapply(comdata_updated, length),
+  Indicators = sapply(comdata_updated, function(x) paste(x, collapse = ", "))
+)
+write.table(update_info, file = "updated_variable_set_regression.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+cat("Updated variable set saved to: updated_variable_set_regression.txt\n")
+
+# Use updated variable set for PLS-PM modeling
+cat("\nUsing regression-updated variable set for PLS-PM modeling...\n")
+comdata_initial <- comdata_updated
+
+# ============================ PART 5: INITIAL PLS-PM MODEL CONSTRUCTION ============================
+cat("\n=== Building Initial PLS-PM Model ===\n")
+
+# Define initial path model based on biological knowledge
+comdata2 <- list(
+  Daily_BcCF = "Surfactin_intes", 
+  Peptidase = c("A39", "A08"), 
+  fatty = c("fadE", "bcd"),
+  HD = c("alkM", "assA"),
+  SCFC = c("pta", "atoD"),
+  gas = c("FeFe_Group_A", "mcrA", "IDH3"),
+  Biof = c("glgP", "wecB", "paaK"),
+  pressure = "flow_pressure", 
+  Marker_mOTU = c("Aliarcobacter_ellisii_Bin937", "Selenomonadales_Bin511"),
+  Hydrogeochemical = c("CO32"),
+  Oil_production = "oil_production"
+)
+
+latent_vars <- c("Daily_BcCF", "Peptidase", "fatty", "HD", "SCFC", "gas", "Biof", 
+                 "pressure", "Marker_mOTU", "Hydrogeochemical", "Oil_production")
+
+# Define path relationships using formulas
+model_formulas <- list(
+  Oil_production = ~ Daily_BcCF + Marker_mOTU + Hydrogeochemical + pressure + HD + SCFC + gas + Biof,  
+  Peptidase = ~ Daily_BcCF,
+  fatty = ~ Daily_BcCF,
+  HD = ~ Peptidase + fatty,
+  SCFC = ~ Peptidase + fatty,
+  gas = ~ Peptidase + fatty,
+  Biof = ~ Peptidase + fatty,
+  pressure = ~ gas,
+  Marker_mOTU = ~ Daily_BcCF + Peptidase + fatty + HD,
+  Hydrogeochemical = ~ Daily_BcCF + HD + SCFC + gas + Biof
+)
+
+# Create path matrix
+dat_path <- matrix(0, nrow = length(latent_vars), ncol = length(latent_vars),
+                   dimnames = list(latent_vars, latent_vars))
+
+for (end_var in names(model_formulas)) {
+  rhs_vars <- all.vars(model_formulas[[end_var]])
+  dat_path[end_var, rhs_vars] <- 1
+}
+
+# Ensure path matrix is lower triangular
+dat_path <- dat_path * lower.tri(dat_path)
+
+# Display path matrix
+print(dat_path)
+
+# Define measurement modes ("A" for reflective)
+dat_modes <- rep("A", length(latent_vars))
+
+# Run initial PLS-PM model with bootstrap
+cat("Running initial PLS-PM model...\n")
+dat_pls_initial <- plspm(data, dat_path, comdata2, 
+                         modes = dat_modes,
+                         boot.val = TRUE,
+                         br = 1000)
+
+cat("\nInitial model summary:\n")
+summary(dat_pls_initial)
+
+# ============================ PART 6: MODEL REFINEMENT ============================
+cat("\n=== Model Refinement Process ===\n")
+
+# 1. Refine measurement model (remove indicators with loading < 0.7)
+cat("\n1. Refining measurement model (checking loadings):\n")
+outer_model_initial <- dat_pls_initial$outer_model
+print(outer_model_initial)
+
+low_loading <- outer_model_initial[abs(outer_model_initial$loading) < 0.7, ]
+cat("\nIndicators with loadings < 0.7:\n")
+print(low_loading)
+
+comdata_refined <- comdata2
+
+for (lv in names(comdata_refined)) {
+  indicators <- comdata_refined[[lv]]
+  low_indicators <- c()
+  
+  for (ind in indicators) {
+    if (ind %in% rownames(low_loading)) {
+      cat(sprintf("Removing indicator '%s' from latent variable '%s' (loading = %.3f)\n", 
+                  ind, lv, low_loading[ind, "loading"]))
+      low_indicators <- c(low_indicators, ind)
+    }
+  }
+  
+  if (length(low_indicators) > 0) {
+    comdata_refined[[lv]] <- setdiff(indicators, low_indicators)
+  }
+}
+
+comdata_refined <- comdata_refined[sapply(comdata_refined, length) > 0]
+cat(sprintf("\nLatent variables after refinement: %d\n", length(comdata_refined)))
+
+# 2. Refine structural model (remove non-significant paths)
+cat("\n2. Refining structural model (checking path significance):\n")
+
+latent_vars_refined <- names(comdata_refined)
+dat_path_refined <- dat_path[latent_vars_refined, latent_vars_refined, drop = FALSE]
+
+# Run refined measurement model
+dat_pls_refined1 <- plspm(data, dat_path_refined, comdata_refined, 
+                          modes = dat_modes[1:length(latent_vars_refined)],
+                          boot.val = TRUE,
+                          br = 1000)
+
+# Get bootstrap confidence intervals for path coefficients
+boot_paths <- dat_pls_refined1$boot$paths
+cat("\n95% bootstrap confidence intervals for path coefficients:\n")
+print(boot_paths)
+
+non_sig_paths <- which(boot_paths[, "perc.025"] * boot_paths[, "perc.975"] < 0 | 
+                       is.na(boot_paths[, "perc.025"]))
+
+cat("\nNon-significant paths (95% CI includes 0):\n")
+if (length(non_sig_paths) > 0) {
+  non_sig_names <- rownames(boot_paths)[non_sig_paths]
+  print(non_sig_names)
+  
+  for (path in non_sig_names) {
+    parts <- strsplit(path, " -> ")[[1]]
+    if (length(parts) == 2) {
+      dat_path_refined[parts[1], parts[2]] <- 0
+      cat(sprintf("Removing path: %s -> %s\n", parts[1], parts[2]))
+    }
+  }
+} else {
+  cat("All paths are significant\n")
+}
+
+cat("\nRefined path matrix:\n")
+print(dat_path_refined)
+
+# ============================ PART 7: FINAL PLS-PM MODEL ============================
+comdata_refined <- list(
+  Daily_BcCF = "Surfactin_intes", 
+  Peptidase = c("S14", "I103"), 
+  fatty = c("bcd"),
+  HD = c("assA"),
+  SCFC = c("IDH3"),
+  gas = c("mcrA"),
+  Biof = c("ddc"),
+  pressure = "flow_pressure", 
+  Marker_mOTU = c("Aliarcobacter_ellisii_Bin937"),
+  Hydrogeochemical = c("NH4"),
+  Oil_production = "oil_production"
+)
+
+latent_vars_refined <- c("Daily_BcCF", "Peptidase", "fatty", "HD", "SCFC", "gas", 
+                        "Biof", "pressure", "Marker_mOTU", "Hydrogeochemical", 
+                        "Oil_production")
+
+# Define final path relationships
+model_formulas <- list(
+  Oil_production = ~ Daily_BcCF + HD + Biof,  
+  Peptidase = ~ Daily_BcCF,
+  fatty = ~ Daily_BcCF,
+  HD = ~ fatty,
+  SCFC = ~ fatty,
+  gas = ~ fatty,
+  Biof = ~ Peptidase + fatty,
+  pressure = ~ gas,
+  Marker_mOTU = ~ HD,
+  Hydrogeochemical = ~ HD
+)
+
+# Create final path matrix
+dat_path_refined <- matrix(0, nrow = length(latent_vars_refined), 
+                          ncol = length(latent_vars_refined),
+                          dimnames = list(latent_vars_refined, latent_vars_refined))
+
+for (end_var in names(model_formulas)) {
+  rhs_vars <- all.vars(model_formulas[[end_var]])
+  dat_path_refined[end_var, rhs_vars] <- 1
+}
+
+dat_path_refined <- dat_path_refined * lower.tri(dat_path_refined)
+
+cat("\n=== Running Final PLS-PM Model ===\n")
+
+# Run final model
+dat_pls_final <- plspm(data, dat_path_refined, comdata_refined, 
+                       modes = dat_modes[1:length(latent_vars_refined)],
+                       boot.val = TRUE,
+                       br = 1000)
+
+cat("\nFinal model summary:\n")
+summary(dat_pls_final)
+
+# ============================ PART 8: MODEL EVALUATION ============================
+cat("\n=== Model Evaluation ===\n")
+
+# 1. Goodness of Fit (GOF)
+cat("\n1. Goodness of Fit (GOF):\n")
+gof_value <- dat_pls_final$gof
+cat(sprintf("GOF = %.3f\n", gof_value))
+
+# 2. Path coefficient significance
+cat("\n2. Path coefficient significance (bootstrap test):\n")
+boot_paths_final <- dat_pls_final$boot$paths
+print(boot_paths_final)
+
+# 3. Explanatory power (R² values)
+cat("\n3. Explanatory power (R² values):\n")
+inner_summary <- dat_pls_final$inner_summary
+r2_values <- inner_summary[inner_summary$Type == "Endogenous", c("R2")]
+print(r2_values)
