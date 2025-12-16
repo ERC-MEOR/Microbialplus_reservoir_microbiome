@@ -1,0 +1,147 @@
+# ============================ PART 1: SETUP ============================
+# Load required packages
+library(lmerTest)       # Mixed effects models
+library(vegan)          # Data processing
+library(ggplot2)        # Plotting
+library(lme4)           # GLMM models
+library(dplyr)          # Data manipulation
+library(car)            # VIF calculation
+library(MuMIn)          # Model selection and averaging
+library(patchwork)      # Plot arrangement
+
+# Set random seed for reproducibility
+set.seed(123)
+
+# ============================ PART 2: COLLINEARITY REMOVAL ============================
+cat("=== Collinearity Removal (Spearman correlation threshold = 0.7) ===\n")
+
+# Read standardized data
+data <- read.table("all_data-std.txt", header = TRUE, sep = "\t")
+
+# Extract numeric columns (starting from column 3)
+numeric_cols <- data[, 3:ncol(data)]
+col_names <- colnames(numeric_cols)
+
+# Function to filter highly correlated variables
+filter_highly_correlated <- function(df, threshold = 0.7) {
+  # Calculate Spearman correlation matrix
+  cor_matrix <- cor(df, method = "spearman")
+  
+  # Convert to long format
+  cor_df <- as.data.frame(as.table(cor_matrix))
+  names(cor_df) <- c("Var1", "Var2", "Correlation")
+  
+  # Remove diagonal and upper triangle
+  cor_df <- cor_df[as.numeric(cor_df$Var1) > as.numeric(cor_df$Var2), ]
+  
+  # Filter correlations above threshold
+  high_cor <- cor_df[abs(cor_df$Correlation) > threshold, ]
+  
+  if (nrow(high_cor) == 0) {
+    return(list(df = df, removed = NULL))
+  }
+  
+  all_high_cor_cols <- unique(c(high_cor$Var1, high_cor$Var2))
+  to_remove <- c()
+  
+  # Process each highly correlated pair
+  for (i in 1:nrow(high_cor)) {
+    col1 <- as.character(high_cor$Var1[i])
+    col2 <- as.character(high_cor$Var2[i])
+    
+    if (!(col1 %in% to_remove) && !(col2 %in% to_remove)) {
+      remove_col <- sample(c(col1, col2), 1)
+      to_remove <- c(to_remove, remove_col)
+    }
+  }
+  
+  if (length(to_remove) > 0) {
+    df_filtered <- df[, !(colnames(df) %in% to_remove), drop = FALSE]
+    return(list(df = df_filtered, removed = to_remove))
+  } else {
+    return(list(df = df, removed = NULL))
+  }
+}
+
+# Iterative collinearity removal
+current_df <- numeric_cols
+removed_columns <- list()
+iteration <- 1
+
+while (TRUE) {
+  cat("Iteration", iteration, "...\n")
+  result <- filter_highly_correlated(current_df, threshold = 0.7)
+  
+  if (is.null(result$removed) || length(result$removed) == 0) {
+    cat("No more highly correlated variables. Filtering complete!\n")
+    break
+  }
+  
+  cat("Removed variables:", paste(result$removed, collapse = ", "), "\n")
+  removed_columns[[iteration]] <- result$removed
+  current_df <- result$df
+  iteration <- iteration + 1
+}
+
+# Create final dataset
+final_data <- cbind(data["ID"], current_df)
+cat("\nFinal variables retained:", paste(colnames(final_data), collapse = ", "), "\n")
+
+# Save filtered data
+write.table(final_data, "filtered_data.txt", sep = "\t", 
+            row.names = FALSE, quote = FALSE)
+
+# ============================ PART 3: VARIANCE INFLATION FACTOR (VIF) ANALYSIS ============================
+cat("\n=== Variance Inflation Factor (VIF) Analysis ===\n")
+
+# Read filtered data
+lmedata_non_colinear <- read.csv("filtered_data.txt", header = TRUE, sep = "\t")
+
+# Function to check and remove variables with VIF > 5
+check_vif <- function(model_formula, data, random_effect = "(1 | oil_well)") {
+  full_formula <- as.formula(paste("oil_production ~", 
+                                  paste(model_formula, collapse = " + "), 
+                                  "+", random_effect))
+  model <- lmer(full_formula, data = data)
+  vif_values <- car::vif(model)
+  return(list(vif = vif_values, model = model))
+}
+
+# Microbial variables VIF analysis
+cat("\n1. VIF analysis for microbial variables:\n")
+microbial_vars <- c("Surfactin_intes", "S7_Methanobacterium_D_Bin30", 
+                    "Caldisericum_Bin914", "S6_Atribacterota_Bin116",
+                    "Syntrophothermus_Bin1193", "S6_Thermosynergistes_pyruvativorans_Bin214",
+                    "Syntrophales_Bin512", "S7_Pseudomonas_E_oleovorans_Bin500_WTA",
+                    "Endomicrobia_Bin1897_WTA", "Caldisericota_Bin286_WTA",
+                    "S6_Stutzerimonas_balearica_Bin288_WTA", "Caldisericia_Bin120_WTA",
+                    "sucA", "iorB", "ilvH", "dfp", "hpaG")
+
+# Initial microbial model
+microbial_result <- check_vif(microbial_vars, lmedata_non_colinear)
+cat("Initial VIF values:\n")
+print(microbial_result$vif)
+
+# Reduced microbial model
+reduced_microbial_vars <- c("Surfactin_intes", "S7_Methanobacterium_D_Bin30",
+                            "Syntrophothermus_Bin1193", "Caldisericota_Bin286_WTA", "sucA")
+microbial_result_reduced <- check_vif(reduced_microbial_vars, lmedata_non_colinear)
+cat("\nReduced model VIF values:\n")
+print(microbial_result_reduced$vif)
+
+# Final reduced model
+model <- lmer(oil_production ~ Surfactin_intes +S7_Methanobacterium_D_Bin30+Syntrophothermus_Bin1193+Caldisericota_Bin286_WTA+sucA+ (1 | oil_well), data =lmedata_non_colinear)  
+vif <- car::vif(model)
+vif
+r2(model)
+
+# ============================ PART 4: MIXED EFFECTS MODEL CONSTRUCTION ============================
+cat("\n=== Mixed Effects Model Construction ===\n")
+
+dd_Auto<- dredge(model, evaluate = TRUE,  rank = "AICc",REML=F, options(na.action = "na.fail"))####2 random effects
+
+##model average#####################################
+
+avg_Auto<-model.avg(dd_Auto,subset = delta<2,revised.var = TRUE,fit = T)
+
+summary(avg_Auto)
