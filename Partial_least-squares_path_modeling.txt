@@ -1,5 +1,4 @@
 # ============================ PART 1: SETUP AND DATA PREPARATION ============================
-
 # Clear environment
 rm(list = ls())
 gc()
@@ -23,9 +22,14 @@ set.seed(123)
 # Read data
 data <- read.csv("all_data-std.txt", header = TRUE, row.names = 1, sep = "\t")
 
-mtotu <- read.table("MAG_abundance.txt", header = TRUE, row.names = 1, sep = "\t")
+motu <- read.table("MAG_abundance.txt",header = T,row.names = 1,sep="\t")
 
-mtgene <- read.table("gene_TPM.txt", header = TRUE, row.names = 1, sep = "\t")
+mtotu <- read.table("MAG_tran_abundance.txt",header = T,row.names = 1,sep="\t")
+
+gene <- read.table("gene_TPM.txt",header = T,row.names = 1,sep="\t")
+gene<-t(gene)
+
+mtgene <- read.table("gene_tran_TPM.txt", header = TRUE, row.names = 1, sep = "\t")
 mtgene <- t(mtgene)
 
 # Standardization function (0-1 normalization)
@@ -46,7 +50,7 @@ standardize_variables <- function(data, vars_to_standardize = NULL, exclude_vars
 exclude_vars <- c("oil_well")
 
 # Process functional gene data 1
-fucgene1 <- read.table("gene_act_1.txt", header = TRUE, row.names = 1, sep = "\t")
+fucgene1 <- read.table("gene_tran_1.txt", header = TRUE, row.names = 1, sep = "\t")
 fucgene1 <- t(fucgene1)
 fucgene1 <- as.data.frame(fucgene1)
 
@@ -64,7 +68,7 @@ for (i in 1:num_batches) {
 fucgene1 <- do.call(rbind, processed_list)
 
 # Process functional gene data 2
-fucgene2 <- read.table("gene_act_2.txt", header = TRUE, row.names = 1, sep = "\t")
+fucgene2 <- read.table("gene_tran_2.txt", header = TRUE, row.names = 1, sep = "\t")
 fucgene2 <- t(fucgene2)
 fucgene2 <- as.data.frame(fucgene2)
 
