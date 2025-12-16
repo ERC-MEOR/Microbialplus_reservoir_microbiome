@@ -1,0 +1,92 @@
+# 1. Load Required Packages ----------------------------------------------------
+library(randomForest)  # Random Forest modeling
+library(reshape2)      # Data reshaping
+library(ggplot2)       # Plotting
+
+# 2. Data Loading and Preprocessing --------------------------------------------
+# Read OTU abundance data (rows: samples, columns: OTUs)
+otu <- read.csv("MAG_abundance.txt", header = TRUE, row.names = 1, sep = "\t")
+
+# Read productivity data and filter specific stages (S0-S6)
+productivity <- read.csv('Productivity.txt', header = TRUE, row.names = 1, sep = "\t")
+productivity <- productivity[productivity$stage %in% paste0("S", 0:6), "oil_production"]
+
+# Merge OTU data with productivity labels
+otu <- cbind(otu, productivity)
+
+# 3. Full-Feature Random Forest Model Building and Parameter Optimization ------
+# Select optimal mtry parameter (number of variables tried at each split)
+set.seed(123)
+rmse <- numeric()
+rsq <- numeric()
+for(i in 1:(ncol(otu) - 1)) {
+  model_test <- randomForest(productivity ~ ., data = otu, mtry = i)
+  rmse <- append(rmse, model_test$mse[500])  # Use MSE at 500 trees
+  rsq <- append(rsq, model_test$rsq[500])    # Use R² at 500 trees
+}
+mtry_opt <- which.min(rmse)  # Select mtry with minimum RMSE
+
+# Build final model with optimal mtry
+set.seed(125)
+otu_full_model <- randomForest(productivity ~ ., data = otu, 
+                               mtry = mtry_opt, ntree = 600, 
+                               importance = TRUE)
+print(otu_full_model)
+
+# Export variable importance
+importance_full <- importance(otu_full_model)
+write.table(importance_full, 'importance_full.txt', sep = '\t', 
+            col.names = NA, quote = FALSE)
+
+# Plot top 50 important variables
+pdf('importance_full_top50.pdf', width = 8, height = 6)
+varImpPlot(otu_full_model, n.var = min(50, nrow(importance_full)),
+           main = 'Top 50 OTUs - Variable Importance')
+dev.off()
+
+# 4. Feature Selection Based on Cross-Validation -------------------------------
+# Perform 5-time repeated 10-fold cross-validation to evaluate errors with different feature counts
+set.seed(122)
+cv_results <- replicate(5, rfcv(otu[-ncol(otu)], otu$productivity, 
+                                cv.fold = 10, step = 1.5), 
+                        simplify = FALSE)
+
+# Organize cross-validation error results
+cv_error <- sapply(cv_results, '[[', 'error.cv')
+cv_error <- data.frame(cv_error)
+cv_error$n_features <- as.numeric(rownames(cv_error))
+cv_error_mean <- aggregate(. ~ n_features, 
+                           data = melt(cv_error, id.vars = "n_features"), 
+                           FUN = mean)
+write.table(cv_error_mean, 'cv_error_mean.txt', sep = '\t', 
+            col.names = NA, quote = FALSE)
+
+# Determine optimal feature count corresponding to minimum error
+n_features_opt <- cv_error_mean$n_features[which.min(cv_error_mean$value)]
+
+# Select top n_features_opt OTUs by importance
+importance_ordered <- importance_full[order(importance_full[, "IncNodePurity"], 
+                                            decreasing = TRUE), ]
+selected_otus <- rownames(importance_ordered)[1:n_features_opt]
+otu_selected <- otu[, c(selected_otus, "productivity")]
+
+# 5. Simplified Feature Set Model Building -------------------------------------
+# Re-optimize mtry on reduced feature set
+set.seed(127)
+rmse_selected <- numeric()
+for(i in 1:(ncol(otu_selected) - 1)) {
+  model_test <- randomForest(productivity ~ ., data = otu_selected, mtry = i)
+  rmse_selected <- append(rmse_selected, model_test$mse[500])
+}
+mtry_selected_opt <- which.min(rmse_selected)
+
+# Build final simplified model with optimal parameters
+set.seed(129)
+model_selected <- randomForest(productivity ~ ., data = otu_selected, 
+                               mtry = mtry_selected_opt, ntree = 600, 
+                               importance = TRUE)
+print(model_selected)
+
+# Save reduced feature set data
+write.table(otu_selected, 'otu_selected.txt', sep = '\t', 
+            col.names = NA, quote = FALSE)
